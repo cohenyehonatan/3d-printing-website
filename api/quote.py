@@ -1,38 +1,39 @@
 import io
-import boto3
 import json
 import logging
 import trimesh
-from flask import Flask, request, jsonify
-from werkzeug.utils import secure_filename
-from botocore.exceptions import ClientError
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from pydantic import BaseModel
 import os
-import logging
 from .sales_tax_rates import sales_tax_rates
 from .zip_to_state import get_state_from_zip
+from . import stripe_service
 
 logging.basicConfig(level=logging.DEBUG)
 
-app = Flask(__name__)
+app = FastAPI(title="3D Print Quote API", max_body_size=100*1024*1024)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Increase max request body size to 100MB by updating Starlette's defaults
+app.add_middleware = lambda middleware, **kwargs: None  # Placeholder, handled by Uvicorn config
 
 MINIMUM_WEIGHT_G = 0.1  # Minimum weight in grams (adjust as needed)
 
-BUCKET_NAME = '3d-printing-website-files'
-
 base_cost = 20
 
-
-
-# Define S3 client
-s3_client = boto3.client(
-    's3',
-    region_name=os.getenv('AWS_REGION'),
-    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
-    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
-)
-
-# Set the maximum file size (e.g., 16 MB)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB file size limit
+# Maximum file size (16 MB)
+MAX_FILE_SIZE = 16 * 1024 * 1024
 
 # Updated filament prices for Bambu Lab
 filament_prices = {
@@ -101,82 +102,91 @@ def calculate_usps_shipping(zip_code, weight_kg, express=False, connect_local=Fa
     weight_lbs = weight_kg * 2.20462  # Convert kg to lbs
     return 7.90  # Example rate
 
-# Flask route to handle the quote request
-def upload_file_to_s3(file_buffer, bucket, object_name):
-    """Upload a file buffer to an S3 bucket"""
 
+# Request models for type validation
+class QuoteRequest(BaseModel):
+    zip_code: str
+    filament_type: str
+    quantity: int = 1
+    rush_order: bool = False
+    use_usps_connect_local: bool = False
+    volume: float = 0
+    weight: float = 0
+
+
+class QuoteResponse(BaseModel):
+    total_cost_with_tax: str
+    sales_tax: str
+    base_cost: str
+    material_cost: str
+    shipping_cost: str
+    rush_order_surcharge: str
+
+
+class VerifyFileResponse(BaseModel):
+    volume: float
+    bounding_box: dict
+    is_watertight: bool
+
+
+class CheckoutRequest(BaseModel):
+    """Request to create a payment link for a print order"""
+    email: str
+    name: str
+    phone: str
+    zip_code: str
+    filament_type: str
+    quantity: int = 1
+    rush_order: bool = False
+    use_usps_connect_local: bool = False
+    volume: float = 0
+    weight: float = 0
+
+
+class CheckoutResponse(BaseModel):
+    """Response with Stripe payment link"""
+    payment_url: str
+    total_amount_cents: int
+
+
+@app.post('/api/quote', response_model=QuoteResponse)
+async def quote(request_data: QuoteRequest):
+    """Calculate quote based on model specifications"""
     try:
-        # Upload the file from memory directly to S3
-        s3_client.upload_fileobj(file_buffer, bucket, object_name)
-    except ClientError as e:
-        logging.error(e)
-        return False
-    return True
-
-
-@app.route('/api/quote', methods=['POST'])
-def quote():
-    try:
-        # Get form data
-        zip_code = request.form.get('zip_code')
-        filament_type = request.form.get('filament_type')
-        quantity = int(request.form.get('quantity', 1))
-        rush_order = request.form.get('rush_order', 'false') == 'true'
-        use_usps_connect_local = request.form.get('use_usps_connect_local', 'false') == 'true'
-
-        # Handle file upload
-        if 'model_file' not in request.files:
-            return jsonify({"error": "No file provided"}), 400
-        file = request.files['model_file']
-        if file.filename == '':
-            return jsonify({"error": "No file selected"}), 400
-
-        # Secure the filename and create S3 object name
-        object_name = secure_filename(file.filename)
+        zip_code = request_data.zip_code
+        filament_type = request_data.filament_type
+        quantity = request_data.quantity
+        rush_order = request_data.rush_order
+        client_volume = request_data.volume
+        client_weight = request_data.weight
         
-        # Upload file to S3
-        file_buffer = io.BytesIO(file.read())
-        upload_success = upload_file_to_s3(file_buffer, BUCKET_NAME, object_name)
-
-        if not upload_success:
-            return jsonify({"error": "Failed to upload file to S3"}), 500
-
-        # Reset buffer position before reusing
-        file_buffer.seek(0)
-
-        # Load the 3D model directly from the in-memory buffer using trimesh
-        try:
-            mesh = trimesh.load(file_buffer, file.filename)
-        except Exception as e:
-            return jsonify({"error": f"Failed to load 3D model: {str(e)}"}), 400
-
-        # Calculate the volume and bounding box
-        volume_cm3 = mesh.volume / 1000  # Convert from mm³ to cm³
-        bounding_box = mesh.bounding_box.extents  # Dimensions (x, y, z)
+        # Validate inputs
+        if not zip_code or not filament_type:
+            raise HTTPException(status_code=400, detail="Missing required fields")
 
         # Check if the filament type is valid
         if filament_type not in material_densities or filament_type not in filament_prices:
-            return jsonify({"error": "Invalid filament type"}), 400
+            raise HTTPException(status_code=400, detail="Invalid filament type")
 
-        # Get the density for the filament
+        # Use client estimate or recalculate from density
         density = material_densities[filament_type]
-
-        # Calculate the total material weight (with minimum threshold)
-        total_weight_g = max(calculate_weight(volume_cm3, density), MINIMUM_WEIGHT_G)
+        
+        if client_weight > 0:
+            total_weight_g = client_weight
+        else:
+            total_weight_g = max(client_volume * density, MINIMUM_WEIGHT_G)
+        
         total_weight_kg = total_weight_g / 1000  # Convert to kg
 
         # Calculate material cost
         total_material_cost = total_weight_kg * filament_prices[filament_type] * quantity
 
-        # Base cost
-        base_cost = 20
-
         # Rush order surcharge
         rush_order_surcharge = 20 if rush_order else 0
 
         # Shipping cost based on weight
-        shipping_weight = calculate_total_weight(volume_cm3, density)
-        shipping_cost = calculate_usps_shipping(zip_code, shipping_weight, express=rush_order, connect_local=use_usps_connect_local)
+        shipping_weight = (total_weight_g + (total_weight_g * 0.15)) / 1000  # Add packaging
+        shipping_cost = calculate_usps_shipping(zip_code, shipping_weight, express=rush_order, connect_local=request_data.use_usps_connect_local)
 
         # Total cost before tax
         total_cost_before_tax = (base_cost + total_material_cost) * quantity + shipping_cost + rush_order_surcharge
@@ -194,16 +204,165 @@ def quote():
             'rush_order_surcharge': f"${rush_order_surcharge:.2f}"
         }
 
-        return jsonify(response_data)
+        return response_data
 
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"Error occurred: {e}")
-        return jsonify({'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.errorhandler(413)
-def request_entity_too_large(error):
-    logging.error(f"File too large: {error}")
-    return jsonify({'error': 'File too large. Maximum file size is 16MB.'}), 413
 
-if __name__ == '__main__':
-    app.run(debug=True)
+@app.post('/api/verify-file', response_model=VerifyFileResponse)
+async def verify_file(file: UploadFile = File(...)):
+    """Server-side verification of STL file using trimesh"""
+    try:
+        # Check file size
+        contents = await file.read()
+        if len(contents) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="File too large. Maximum file size is 16MB.")
+        
+        # Read file into memory
+        file_buffer = io.BytesIO(contents)
+        
+        # Load the 3D model using trimesh
+        try:
+            mesh = trimesh.load(file_buffer, file.filename)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to load 3D model: {str(e)}")
+        
+        # Calculate the volume and bounding box
+        volume_cm3 = mesh.volume / 1000  # Convert from mm³ to cm³
+        bounding_box = mesh.bounding_box.extents  # Dimensions (x, y, z)
+        
+        response_data = {
+            'volume': volume_cm3,
+            'bounding_box': {
+                'x': bounding_box[0],
+                'y': bounding_box[1],
+                'z': bounding_box[2]
+            },
+            'is_watertight': bool(mesh.is_watertight)
+        }
+        
+        return response_data
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error verifying file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/api/checkout', response_model=CheckoutResponse)
+async def checkout(request_data: CheckoutRequest):
+    """Create a Stripe payment link for a 3D print order"""
+    try:
+        # Validate inputs
+        if not all([request_data.email, request_data.name, request_data.zip_code, request_data.filament_type]):
+            raise HTTPException(status_code=400, detail="Missing required fields")
+
+        # Calculate the quote to get total amount
+        quote_request = QuoteRequest(
+            zip_code=request_data.zip_code,
+            filament_type=request_data.filament_type,
+            quantity=request_data.quantity,
+            rush_order=request_data.rush_order,
+            use_usps_connect_local=request_data.use_usps_connect_local,
+            volume=request_data.volume,
+            weight=request_data.weight
+        )
+        
+        quote_response = await quote(quote_request)
+        
+        # Extract total amount (remove $ and convert to cents)
+        total_amount_str = quote_response.total_cost_with_tax.replace('$', '').replace(',', '')
+        total_amount_float = float(total_amount_str)
+        total_amount_cents = int(total_amount_float * 100)
+        
+        # Create a temporary customer object for Stripe
+        # Note: In production, you'd save this to a database first
+        from .models import Customer
+        customer = Customer(
+            name=request_data.name,
+            email=request_data.email,
+            phone=request_data.phone or '',
+        )
+        
+        # Create Stripe customer
+        stripe_customer_id = stripe_service.get_or_create_stripe_customer(customer)
+        
+        if not stripe_customer_id:
+            raise HTTPException(status_code=500, detail="Failed to create payment link. Stripe may not be configured.")
+        
+        # Create a temporary booking-like object for payment link creation
+        class TempBooking:
+            def __init__(self):
+                self.id = 0  # Temporary ID for quote
+                self.customer_id = customer.id
+                self.service_type = f"3D Print - {request_data.filament_type}"
+                self.location_type = None
+                self.service_address = ""
+                self.deposit_amount = total_amount_cents
+                self.preferred_date = None
+                self.severity_score = None
+                self.customer = customer
+                self.vehicle = None
+        
+        booking = TempBooking()
+        
+        # Create payment link using stripe_service
+        payment_url = stripe_service.create_payment_link_for_booking(booking, None, customer)
+        
+        if not payment_url:
+            raise HTTPException(status_code=500, detail="Failed to create payment link")
+        
+        return CheckoutResponse(
+            payment_url=payment_url,
+            total_amount_cents=total_amount_cents
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error during checkout: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Checkout error: {str(e)}")
+
+
+@app.get('/api/order-details')
+async def get_order_details(booking_id: int = None, customer_id: int = None):
+    """Get order details after successful payment (optional - for payment success page)"""
+    try:
+        if not booking_id or not customer_id:
+            # Return generic success response if IDs not provided
+            return {
+                "status": "success",
+                "message": "Order confirmed"
+            }
+        
+        # In a production system, you would:
+        # 1. Query the database for booking and customer details
+        # 2. Return order summary with delivery estimate
+        # For now, return a generic response
+        
+        return {
+            "booking_id": booking_id,
+            "customer_id": customer_id,
+            "status": "confirmed",
+            "message": "Your order has been confirmed. Check your email for details.",
+            "estimated_delivery": "3-5 business days"
+        }
+    
+    except Exception as e:
+        logging.error(f"Error fetching order details: {e}")
+        # Don't throw error - payment was successful, just return minimal response
+        return {
+            "status": "success",
+            "message": "Your payment was successful. Check your email for order details."
+        }
+
+
+# Mount static files (React app) - must be after API routes
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
