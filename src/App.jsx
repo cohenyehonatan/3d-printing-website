@@ -5,7 +5,7 @@ import PaymentSuccess from './PaymentSuccess';
 import ShippingDashboard from './ShippingDashboard';
 import GlobalHeader from './GlobalHeader';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
-
+import { apiFetch } from './api.js';
 
 
 const QuoteForm = ({ /* pass your existing props */ }) => {
@@ -66,7 +66,7 @@ const QuoteForm = ({ /* pass your existing props */ }) => {
     const prefillZipData = async () => {
       if (selections.zip_code && selections.zip_code.length === 5) {
         try {
-          const response = await fetch(`/api/lookup/zip-location/${selections.zip_code}`);
+          const response = await apiFetch(`/api/lookup/zip-location/${selections.zip_code}`);
           if (response.ok) {
             const data = await response.json();
             setSelections(prev => ({
@@ -129,7 +129,7 @@ const QuoteForm = ({ /* pass your existing props */ }) => {
       const material = materials.find(m => m.id === selections.material);
       const weight = modelStats.weight || (modelStats.volume * material.density);
       
-      const response = await fetch('/api/quote', {
+      const response = await apiFetch('/api/quote', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -169,7 +169,7 @@ const QuoteForm = ({ /* pass your existing props */ }) => {
       setLoadingRates(true);
       const weightInLbs = (weight * 2.20462) || 0.5; // Convert grams to pounds
       
-      const response = await fetch('/api/shipping-rates', {
+      const response = await apiFetch('/api/shipping-rates', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -251,7 +251,7 @@ const QuoteForm = ({ /* pass your existing props */ }) => {
         shipping_cost: selectedShippingService?.cost || 0  // UPS shipping cost in dollars
       };
 
-      const response = await fetch('/api/checkout', {
+      const response = await apiFetch('/api/checkout', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'

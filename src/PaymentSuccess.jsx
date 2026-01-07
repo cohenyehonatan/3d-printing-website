@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { CheckCircle, Download, Home } from 'lucide-react';
+import { apiFetch } from './api.js';
 
 const PaymentSuccess = ({ orderId, customerId }) => {
   const [orderDetails, setOrderDetails] = useState(null);
@@ -17,7 +18,7 @@ const PaymentSuccess = ({ orderId, customerId }) => {
 
   const fetchOrderDetails = async () => {
     try {
-      const response = await fetch(`/api/order-details?order_id=${orderId}&customer_id=${customerId}`);
+      const response = await apiFetch(`/api/order-details?order_id=${orderId}&customer_id=${customerId}`);
       if (response.ok) {
         const data = await response.json();
         setOrderDetails(data);

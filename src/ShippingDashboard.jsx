@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import GlobalHeader from './GlobalHeader';
 import './ShippingDashboard.css';
+import { apiFetch } from './api.js';
 
 // UPS Tracking Status Mappings
 const UPS_STATUS_CODES = {
@@ -211,7 +212,7 @@ const ShippingDashboard = () => {
     // If order is labeled and we don't have tracking status yet, fetch it
     if (selectedOrder.label_created && selectedOrder.tracking_number && !selectedOrder.tracking_status) {
       console.log(`Fetching tracking status for order ${selectedOrder.id}`);
-      fetch(`/api/dashboard/track/${selectedOrder.tracking_number}`)
+      apiFetch(`/api/dashboard/track/${selectedOrder.tracking_number}`)
         .then(res => res.json())
         .then(data => {
           if (!data.error && data.statusCode) {
@@ -249,7 +250,7 @@ const ShippingDashboard = () => {
       setListLoading(true);
       setFetchError(null);
       console.log('Fetching orders from /api/dashboard/shipping-labels');
-      const response = await fetch('/api/dashboard/shipping-labels');
+      const response = await apiFetch('/api/dashboard/shipping-labels');
       console.log('Response status:', response.status);
       if (!response.ok) throw new Error(`Failed to fetch orders: ${response.status} ${response.statusText}`);
       const data = await response.json();
@@ -342,7 +343,7 @@ const ShippingDashboard = () => {
       };
 
       const endpoint = carrier === 'UPS' ? '/api/validate-address-ups' : '/api/validate-address';
-      const response = await fetch(endpoint, {
+      const response = await apiFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(addressPayload),
@@ -434,7 +435,7 @@ const ShippingDashboard = () => {
 
   const updateLabelStatus = async (orderId, trackingNumber) => {
     try {
-      const response = await fetch(`/api/dashboard/shipping-labels/${orderId}`, {
+      const response = await apiFetch(`/api/dashboard/shipping-labels/${orderId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -456,7 +457,7 @@ const ShippingDashboard = () => {
     try {
       setActionLoading(true);
       setActionError(null);
-      const response = await fetch(`/api/dashboard/shipping-labels/${orderId}/create-label-ups`, {
+      const response = await apiFetch(`/api/dashboard/shipping-labels/${orderId}/create-label-ups`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
@@ -492,7 +493,7 @@ const ShippingDashboard = () => {
         ? Math.round(parseFloat(editFields.package_value) * 100)
         : null;
 
-      const response = await fetch(`/api/dashboard/shipping-labels/${selectedOrder.id}`, {
+      const response = await apiFetch(`/api/dashboard/shipping-labels/${selectedOrder.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -529,7 +530,7 @@ const ShippingDashboard = () => {
       setTrackingError(null);
       setTrackingData(null);
 
-      const response = await fetch(`/api/dashboard/track/${selectedOrder.tracking_number}`);
+      const response = await apiFetch(`/api/dashboard/track/${selectedOrder.tracking_number}`);
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));

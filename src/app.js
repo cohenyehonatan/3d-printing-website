@@ -1,3 +1,5 @@
+import { apiFetch } from './api.js';
+
 document.getElementById('quoteForm').addEventListener('submit', async function (e) {
     e.preventDefault();
 
@@ -10,7 +12,7 @@ document.getElementById('quoteForm').addEventListener('submit', async function (
 
     // Step 1: Get a pre-signed URL for S3 upload
     try {
-        const response = await fetch('/generate-presigned-url', {
+        const response = await apiFetch('/generate-presigned-url', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -49,7 +51,7 @@ document.getElementById('quoteForm').addEventListener('submit', async function (
         formData.append('use_usps_connect_local', document.getElementById('use_usps_connect_local').checked ? 'true' : 'false');
         formData.append('file_url', presignedUrl);  // Send the S3 file URL
 
-        const quoteResponse = await fetch('/api/quote', {
+        const quoteResponse = await apiFetch('/api/quote', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
