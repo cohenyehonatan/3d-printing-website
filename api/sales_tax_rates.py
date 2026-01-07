@@ -1,14 +1,20 @@
 import csv
+from pathlib import Path
 
 # Function to load sales tax rates from the CSV using built-in csv module
 def load_sales_tax_rates():
     tax_rates = {}
-    with open('stateSalesTax.csv', mode='r') as file:
+    # Use absolute path relative to this module
+    csv_path = Path(__file__).parent.parent / 'stateSalesTax.csv'
+    with open(csv_path, mode='r') as file:
         reader = csv.DictReader(file)
         for row in reader:
             # Remove the '%' and convert to a decimal
             combined_rate = float(row['Combined Rate'].strip('%')) / 100
-            tax_rates[row['State']] = combined_rate
+            state_name = row['State']
+            # Remove footnote markers like (a), (b), (c) etc
+            state_name = state_name.split('(')[0].strip()
+            tax_rates[state_name] = combined_rate
     return tax_rates
 
 # Store the sales tax rates in memory

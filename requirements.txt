@@ -16,3 +16,5 @@ typing_extensions==4.12.2
 zipp==3.20.1
 trimesh==4.4.9
 stripe>=10.0.0
+httpx>=0.24.0
+python-dotenv>=1.0.0

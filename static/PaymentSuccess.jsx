@@ -1,23 +1,23 @@
 import React, { useEffect, useState } from 'react';
 import { CheckCircle, Download, Home } from 'lucide-react';
 
-const PaymentSuccess = ({ bookingId, customerId }) => {
+const PaymentSuccess = ({ orderId, customerId }) => {
   const [orderDetails, setOrderDetails] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     // Fetch order details if IDs are provided
-    if (bookingId && customerId) {
+    if (orderId && customerId) {
       fetchOrderDetails();
     } else {
       setLoading(false);
     }
-  }, [bookingId, customerId]);
+  }, [orderId, customerId]);
 
   const fetchOrderDetails = async () => {
     try {
-      const response = await fetch(`/api/order-details?booking_id=${bookingId}&customer_id=${customerId}`);
+      const response = await fetch(`/api/order-details?order_id=${orderId}&customer_id=${customerId}`);
       if (response.ok) {
         const data = await response.json();
         setOrderDetails(data);
@@ -57,15 +57,15 @@ const PaymentSuccess = ({ bookingId, customerId }) => {
           </div>
 
           {/* Order Details */}
-          {!loading && (orderDetails || (bookingId && customerId)) && (
+          {!loading && (orderDetails || (orderId && customerId)) && (
             <div className="bg-gray-50 rounded-lg p-6 mb-8">
               <h3 className="font-semibold text-lg text-gray-900 mb-4">Order Details</h3>
               
               {orderDetails && (
                 <div className="space-y-3 text-sm">
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Order Number:</span>
-                    <span className="font-medium">{orderDetails.booking_id}</span>
+                    <span className="text-gray-600">Order ID:</span>
+                    <span className="font-medium">{orderDetails.order_id}</span>
                   </div>
                   {orderDetails.order_date && (
                     <div className="flex justify-between">
@@ -76,7 +76,11 @@ const PaymentSuccess = ({ bookingId, customerId }) => {
                   {orderDetails.estimated_delivery && (
                     <div className="flex justify-between">
                       <span className="text-gray-600">Estimated Delivery:</span>
-                      <span className="font-medium">{new Date(orderDetails.estimated_delivery).toLocaleDateString()}</span>
+                      <span className="font-medium">
+                        {Number.isNaN(Date.parse(orderDetails.estimated_delivery))
+                          ? orderDetails.estimated_delivery
+                          : new Date(orderDetails.estimated_delivery).toLocaleDateString()}
+                      </span>
                     </div>
                   )}
                   {orderDetails.total_amount && (
@@ -88,11 +92,11 @@ const PaymentSuccess = ({ bookingId, customerId }) => {
                 </div>
               )}
 
-              {!orderDetails && bookingId && customerId && (
+              {!orderDetails && orderId && customerId && (
                 <div className="space-y-3 text-sm">
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Booking ID:</span>
-                    <span className="font-medium">{bookingId}</span>
+                    <span className="text-gray-600">Order ID:</span>
+                    <span className="font-medium">{orderId}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-600">Customer ID:</span>

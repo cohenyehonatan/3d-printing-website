@@ -1,24 +1,88 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Upload, Package, DollarSign, Settings, CheckCircle } from 'lucide-react';
 import STLParser from './STLParser';
 import PaymentSuccess from './PaymentSuccess';
+import ShippingDashboard from './ShippingDashboard';
+import GlobalHeader from './GlobalHeader';
+import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
 
-const App = () => {
+
+
+const QuoteForm = ({ /* pass your existing props */ }) => {
   const [step, setStep] = useState(1);
+  const [showPaymentSuccess, setShowPaymentSuccess] = useState(false);
+  const [paymentParams, setPaymentParams] = useState({});
   const [modelFile, setModelFile] = useState(null);
   const [modelStats, setModelStats] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [selections, setSelections] = useState({
-    material: '',
-    quantity: 1,
-    zip_code: '',
-    rush_order: false,
+    // Contact info
     email: '',
     name: '',
-    phone: ''
+    phone: '',
+    // Delivery address (for Click-N-Ship)
+    first_name: '',
+    middle_initial: '',
+    last_name: '',
+    company: '',
+    street_address: '',
+    apt_suite: '',
+    city: '',
+    state: '',
+    zip_code: '',
+    country: 'United States of America',
+    // Order details
+    material: '',
+    quantity: 1,
+    rush_order: false,
+    // Packaging
+    packaging_type: '',
+    contains_hazmat: false,
+    contains_live_animals: false,
+    contains_perishable: false,
+    contains_cremated_remains: false
   });
   const [quote, setQuote] = useState(null);
+  const [showDashboard, setShowDashboard] = useState(false);
+  const [shippingRates, setShippingRates] = useState([]);
+  const [selectedShippingService, setSelectedShippingService] = useState(null);
+  const [loadingRates, setLoadingRates] = useState(false);
+
+  // Check URL on mount for payment success redirect
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('payment-success') || params.has('order_id')) {
+      setPaymentParams({
+        order_id: params.get('order_id'),
+        customer_id: params.get('customer_id')
+      });
+      setShowPaymentSuccess(true);
+    }
+  }, []);
+
+  // Auto-fill city and state when ZIP code is entered
+  useEffect(() => {
+    const prefillZipData = async () => {
+      if (selections.zip_code && selections.zip_code.length === 5) {
+        try {
+          const response = await fetch(`/api/lookup/zip-location/${selections.zip_code}`);
+          if (response.ok) {
+            const data = await response.json();
+            setSelections(prev => ({
+              ...prev,
+              city: data.city,
+              state: data.state
+            }));
+          }
+        } catch (err) {
+          console.log(`Could not auto-fill for ZIP code ${selections.zip_code}:`, err.message);
+        }
+      }
+    };
+
+    prefillZipData();
+  }, [selections.zip_code]);
 
   const materials = [
     { id: 'PLA Basic', name: 'PLA Basic', pricePerKg: 19.99, density: 1.24, description: 'Standard, eco-friendly' },
@@ -88,6 +152,10 @@ const App = () => {
 
       const quoteData = await response.json();
       setQuote(quoteData);
+      
+      // Fetch shipping rates for the destination
+      await fetchShippingRates(weight);
+      
       setStep(3);
     } catch (err) {
       setError(err.message);
@@ -96,9 +164,54 @@ const App = () => {
     }
   };
 
+  const fetchShippingRates = async (weight) => {
+    try {
+      setLoadingRates(true);
+      const weightInLbs = (weight * 2.20462) || 0.5; // Convert grams to pounds
+      
+      const response = await fetch('/api/shipping-rates', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          zip_code: selections.zip_code,
+          weight: weightInLbs,
+          length: 5,
+          width: 5,
+          height: 5
+        })
+      });
+
+      if (!response.ok) {
+        console.warn('Failed to fetch shipping rates');
+        return;
+      }
+
+      const ratesData = await response.json();
+      if (!ratesData.error && ratesData.rates && ratesData.rates.length > 0) {
+        setShippingRates(ratesData.rates);
+        // Auto-select the first (cheapest) option
+        setSelectedShippingService(ratesData.rates[0]);
+      } else {
+        console.warn('No shipping rates available');
+      }
+    } catch (err) {
+      console.warn('Error fetching shipping rates:', err.message);
+      // Don't fail the quote if rates fail - continue with default
+    } finally {
+      setLoadingRates(false);
+    }
+  };
+
   const proceedToCheckout = async () => {
     if (!selections.email || !selections.name) {
       alert('Please enter your email and name to proceed');
+      return;
+    }
+    
+    if (!selections.street_address || !selections.city || !selections.state || !selections.zip_code) {
+      alert('Please enter complete shipping address');
       return;
     }
 
@@ -109,23 +222,41 @@ const App = () => {
       const material = materials.find(m => m.id === selections.material);
       const weight = modelStats.weight || (modelStats.volume * material.density);
 
+      const checkoutData = {
+        // Contact info
+        email: selections.email,
+        name: selections.name,
+        phone: selections.phone || '',
+        // Delivery address
+        first_name: selections.first_name || selections.name.split(' ')[0],
+        middle_initial: selections.middle_initial || '',
+        last_name: selections.last_name || selections.name.split(' ').slice(1).join(' '),
+        company: selections.company || '',
+        street_address: selections.street_address,
+        apt_suite: selections.apt_suite || '',
+        city: selections.city,
+        state: selections.state,
+        zip_code: selections.zip_code,
+        country: selections.country,
+        // Order details
+        filament_type: selections.material,
+        quantity: selections.quantity,
+        rush_order: selections.rush_order,
+        volume: modelStats.volume,
+        weight: weight,
+        use_usps_connect_local: false,
+        // Shipping service selection with cost
+        shipping_service_code: selectedShippingService?.serviceCode || '03',
+        shipping_service_name: selectedShippingService?.serviceName || 'UPS Ground',
+        shipping_cost: selectedShippingService?.cost || 0  // UPS shipping cost in dollars
+      };
+
       const response = await fetch('/api/checkout', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          email: selections.email,
-          name: selections.name,
-          phone: selections.phone || '',
-          zip_code: selections.zip_code,
-          filament_type: selections.material,
-          quantity: selections.quantity,
-          rush_order: selections.rush_order,
-          volume: modelStats.volume,
-          weight: weight,
-          use_usps_connect_local: false
-        })
+        body: JSON.stringify(checkoutData)
       });
 
       if (!response.ok) {
@@ -133,10 +264,10 @@ const App = () => {
         throw new Error(err.detail || 'Failed to create checkout');
       }
 
-      const checkoutData = await response.json();
+      const finalCheckoutData = await response.json();
       
       // Redirect to Stripe payment link
-      window.location.href = checkoutData.payment_url;
+      window.location.href = finalCheckoutData.payment_url;
     } catch (err) {
       setError(err.message);
     } finally {
@@ -145,26 +276,13 @@ const App = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
-      {/* Header */}
-      <header className="bg-white shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <Package className="w-8 h-8 text-indigo-600" />
-              <h1 className="text-2xl font-bold text-gray-900">Print3D Pro</h1>
-            </div>
-            <div className="flex space-x-4 text-sm text-gray-600">
-              <span>Instant Quote</span>
-              <span>•</span>
-              <span>Fast Turnaround</span>
-              <span>•</span>
-              <span>Quality Assured</span>
-            </div>
-          </div>
-        </div>
-      </header>
-
+    <>
+      {showPaymentSuccess ? (
+        <PaymentSuccess orderId={paymentParams.order_id} customerId={paymentParams.customer_id} />
+      ) : (
+        <>
+          <GlobalHeader />
+          <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
       {/* Progress Bar */}
       <div className="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between mb-8">
@@ -434,9 +552,159 @@ const App = () => {
                     </div>
                   </div>
                 </div>
+
+                {/* Shipping Address (for Click-N-Ship) */}
+                <div className="bg-red-50 p-4 rounded-lg border-2 border-red-300">
+                  <h3 className="font-semibold mb-1 text-gray-700">Shipping Address *</h3>
+                  <p className="text-xs text-gray-600 mb-3">(Required for label creation)</p>
+                  
+                  <div className="space-y-2">
+                    {/* Name fields */}
+                    <div className="grid grid-cols-12 gap-2">
+                      <div className="col-span-5">
+                        <label className="text-xs font-medium text-gray-600">First Name</label>
+                        <input
+                          type="text"
+                          value={selections.first_name}
+                          onChange={(e) => setSelections({...selections, first_name: e.target.value})}
+                          placeholder="John"
+                          className="w-full mt-1 px-2 py-1 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="text-xs font-medium text-gray-600">MI</label>
+                        <input
+                          type="text"
+                          maxLength="1"
+                          value={selections.middle_initial}
+                          onChange={(e) => setSelections({...selections, middle_initial: e.target.value.toUpperCase()})}
+                          placeholder="M"
+                          className="w-full mt-1 px-2 py-1 border border-gray-300 rounded text-xs text-center focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                        />
+                      </div>
+                      <div className="col-span-5">
+                        <label className="text-xs font-medium text-gray-600">Last Name</label>
+                        <input
+                          type="text"
+                          value={selections.last_name}
+                          onChange={(e) => setSelections({...selections, last_name: e.target.value})}
+                          placeholder="Doe"
+                          className="w-full mt-1 px-2 py-1 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Company */}
+                    <div>
+                      <label className="text-xs font-medium text-gray-600">Company</label>
+                      <input
+                        type="text"
+                        value={selections.company}
+                        onChange={(e) => setSelections({...selections, company: e.target.value})}
+                        placeholder="Company Name (optional)"
+                        className="w-full mt-1 px-2 py-1 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                      />
+                    </div>
+
+                    {/* Street */}
+                    <div>
+                      <label className="text-xs font-medium text-gray-600">Street Address *</label>
+                      <input
+                        type="text"
+                        value={selections.street_address}
+                        onChange={(e) => setSelections({...selections, street_address: e.target.value})}
+                        placeholder="123 Main St"
+                        className="w-full mt-1 px-2 py-1 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                      />
+                    </div>
+
+                    {/* Apt/Suite */}
+                    <div>
+                      <label className="text-xs font-medium text-gray-600">Apt/Suite/Other</label>
+                      <input
+                        type="text"
+                        value={selections.apt_suite}
+                        onChange={(e) => setSelections({...selections, apt_suite: e.target.value})}
+                        placeholder="Apt 4B (optional)"
+                        className="w-full mt-1 px-2 py-1 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                      />
+                    </div>
+
+                    {/* City, State, ZIP */}
+                    <div className="grid grid-cols-12 gap-2">
+                      <div className="col-span-6">
+                        <label className="text-xs font-medium text-gray-600">City *</label>
+                        <input
+                          type="text"
+                          value={selections.city}
+                          readOnly
+                          placeholder="New York"
+                          className="w-full mt-1 px-2 py-1 border border-gray-300 rounded text-xs bg-gray-50 text-gray-700 cursor-not-allowed"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="text-xs font-medium text-gray-600">State *</label>
+                        <input
+                          type="text"
+                          maxLength="2"
+                          value={selections.state}
+                          readOnly
+                          placeholder="NY"
+                          className="w-full mt-1 px-2 py-1 border border-gray-300 rounded text-xs text-center bg-gray-50 text-gray-700 cursor-not-allowed"
+                        />
+                      </div>
+                      <div className="col-span-4">
+                        <label className="text-xs font-medium text-gray-600">ZIP *</label>
+                        <input
+                          type="text"
+                          value={selections.zip_code}
+                          onChange={(e) => setSelections({...selections, zip_code: e.target.value})}
+                          placeholder="10001"
+                          className="w-full mt-1 px-2 py-1 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
               </div>
 
-              <div className="border-t pt-6">
+              {/* Shipping Options */}
+              <div className="bg-blue-50 p-4 rounded-lg border-2 border-blue-300">
+                <h3 className="font-semibold mb-3 text-gray-700">Shipping Options</h3>
+                {loadingRates ? (
+                  <div className="text-center py-4">
+                    <p className="text-gray-600">Loading available shipping services...</p>
+                  </div>
+                ) : shippingRates.length > 0 ? (
+                  <div className="space-y-2">
+                    {shippingRates.map((rate, idx) => (
+                      <label key={idx} className="flex items-center p-3 border rounded-lg cursor-pointer hover:bg-blue-100 transition" style={{backgroundColor: selectedShippingService?.serviceCode === rate.serviceCode ? '#dbeafe' : '#f0f9ff'}}>
+                        <input
+                          type="radio"
+                          name="shippingService"
+                          checked={selectedShippingService?.serviceCode === rate.serviceCode}
+                          onChange={() => setSelectedShippingService(rate)}
+                          className="mr-3 w-4 h-4 text-indigo-600"
+                        />
+                        <div className="flex-1">
+                          <div className="font-medium text-gray-700">{rate.serviceName}</div>
+                          <div className="text-xs text-gray-500">
+                            {rate.estimatedDays && `Estimated delivery: ${rate.estimatedDays} business day${rate.estimatedDays > 1 ? 's' : ''}`}
+                          </div>
+                        </div>
+                        <div className="text-lg font-semibold text-indigo-600">{rate.displayCost}</div>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-4">
+                    <p className="text-gray-600 text-sm">Unable to load shipping rates. Proceeding with standard shipping.</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-white rounded-lg shadow-lg p-8 mt-6">
                 <div className="space-y-2 mb-6 text-sm">
                   <div className="flex justify-between">
                     <span className="text-gray-600">Base Cost:</span>
@@ -476,7 +744,7 @@ const App = () => {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-4">
                   <button
                     onClick={() => setStep(2)}
                     className="px-6 py-3 border-2 border-gray-300 rounded-lg font-medium hover:bg-gray-50 transition"
@@ -496,7 +764,33 @@ const App = () => {
           </div>
         )}
       </div>
-    </div>
+          </div>
+        </>
+      )}
+    </>
+  );
+};
+
+const App = () => {
+  const PaymentSuccessRoute = () => {
+    const location = useLocation();
+    const params = new URLSearchParams(location.search);
+    return (
+      <PaymentSuccess
+        orderId={params.get('order_id')}
+        customerId={params.get('customer_id')}
+      />
+    );
+  };
+
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<QuoteForm />} />
+        <Route path="/payment-success" element={<PaymentSuccessRoute />} />
+        <Route path="/dashboard/shipping" element={<ShippingDashboard />} />
+      </Routes>
+    </Router>
   );
 };
 
