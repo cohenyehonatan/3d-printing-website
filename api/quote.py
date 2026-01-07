@@ -6,7 +6,6 @@ import csv
 import math
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
@@ -1844,7 +1843,3 @@ async def track_shipment(tracking_number: str):
     except Exception as e:
         logging.error(f"Error tracking shipment {tracking_number}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to track shipment: {str(e)}")
-
-
-# Mount static files (React app) - must be after API routes
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
