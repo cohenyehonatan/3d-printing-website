@@ -162,12 +162,12 @@ def manual_input(order_id):
             db.close()
             return -1
         
-        print(f"\nUpdating dimensions for Order {order.order_number}")
-        print(f"Current: volume={order.volume_cm3}cm³, weight={order.weight_g}g")
+        print(f"\nUpdating dimensions for Order {getattr(order, 'order_number', 'N/A')}")
+        print(f"Current: volume={getattr(order, 'volume_cm3', 'N/A')}cm³, weight={getattr(order, 'weight_g', 'N/A')}g")
         
         # Get estimated dimensions as suggestion
-        if order.volume_cm3:
-            est_l, est_w, est_h = estimate_dimensions(order.volume_cm3)
+        if getattr(order, 'volume_cm3', None):
+            est_l, est_w, est_h = estimate_dimensions(getattr(order, 'volume_cm3', None))
             print(f"Estimated from volume: {est_l}mm × {est_w}mm × {est_h}mm\n")
         
         try:
@@ -180,9 +180,9 @@ def manual_input(order_id):
             confirm = input("Confirm? (y/n): ").lower()
             
             if confirm == 'y':
-                order.model_length_mm = length
-                order.model_width_mm = width
-                order.model_height_mm = height
+                setattr(order, 'model_length_mm', length)
+                setattr(order, 'model_width_mm', width)
+                setattr(order, 'model_height_mm', height)
                 db.commit()
                 print("✓ Order updated successfully!")
                 db.close()
