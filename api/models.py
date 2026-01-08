@@ -128,6 +128,11 @@ class PrintOrder(Base):
     weight_g = Column(Float, nullable=False)
     quantity = Column(Integer, default=1)
     
+    # Model dimensions (in mm) for packing optimization
+    model_length_mm = Column(Float)  # X dimension
+    model_width_mm = Column(Float)   # Y dimension
+    model_height_mm = Column(Float)  # Z dimension
+    
     # Options
     rush_order = Column(Boolean, default=False)
     
@@ -153,6 +158,9 @@ class PrintOrder(Base):
     shipping_cost_cents = Column(Integer)
     shipping_zone = Column(Integer)
     shipping_weight_g: Mapped[float | None] = mapped_column(Float)
+    
+    # Carrier scan tracking (immutable once set)
+    first_carrier_scan_at = Column(DateTime, nullable=True)  # When UPS first scanned package - hard lock on regeneration
     
     # Content & Packaging
     packaging_type = Column(String(50))  # e.g., "USPS Small Priority Box", "Custom"

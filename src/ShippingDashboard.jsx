@@ -127,6 +127,11 @@ const ShippingDashboard = () => {
   const [trackingLoading, setTrackingLoading] = useState(false);
   const [trackingError, setTrackingError] = useState(null);
   const [showTrackingDetails, setShowTrackingDetails] = useState(false);
+  
+  // Packing recommendation state
+  const [packingRecommendation, setPackingRecommendation] = useState(null);
+  const [packingLoading, setPackingLoading] = useState(false);
+  const [packingError, setPackingError] = useState(null);
 
   // Define getStatusDisplay BEFORE using it
   const getStatusDisplay = (order) => {
@@ -259,6 +264,7 @@ const ShippingDashboard = () => {
         const delivery = order.delivery_address || {};
         const shipping = order.shipping_details || {};
         const packaging = order.packaging || {};
+        const dimensions = order.model_dimensions || {};
         const shippingCost = shipping.shipping_cost_cents != null
           ? (shipping.shipping_cost_cents / 100).toFixed(2)
           : '0.00';
@@ -299,7 +305,12 @@ const ShippingDashboard = () => {
           package_value: packageValueCents ? (packageValueCents / 100).toFixed(2) : '0.00',
           total_weight: totalWeight,
           shipping_cost: shippingCost,
-          shipping_zone: shipping.shipping_zone ? `Zone ${shipping.shipping_zone}` : 'N/A'
+          shipping_zone: shipping.shipping_zone ? `Zone ${shipping.shipping_zone}` : 'N/A',
+          quantity: shipping.quantity || 1,
+          shipping_service: order.selected_service || 'UPS Ground',
+          model_length_mm: dimensions.length_mm,
+          model_width_mm: dimensions.width_mm,
+          model_height_mm: dimensions.height_mm,
         };
       });
       setOrders(normalizedOrders);
@@ -464,7 +475,12 @@ const ShippingDashboard = () => {
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        setActionError(`Failed to create label: ${errorData.detail || response.statusText}`);
+        // 409 = Conflict (label already scanned by carrier, cannot regenerate)
+        if (response.status === 409) {
+          setActionError(`⚠️ Cannot regenerate: ${errorData.detail || 'Label already scanned by UPS. Contact support if voiding is needed.'}`);
+        } else {
+          setActionError(`Failed to create label: ${errorData.detail || response.statusText}`);
+        }
         return;
       }
       
@@ -573,6 +589,45 @@ const ShippingDashboard = () => {
       return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
     } catch {
       return 'N/A';
+    }
+  };
+
+  const getPackingRecommendation = async () => {
+    if (!selectedOrder) {
+      setPackingError('No order selected');
+      return;
+    }
+
+    try {
+      setPackingLoading(true);
+      setPackingError(null);
+      setPackingRecommendation(null);
+
+      const response = await apiFetch('/api/packing-recommendation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model_length_mm: selectedOrder.model_length_mm,
+          model_width_mm: selectedOrder.model_width_mm,
+          model_height_mm: selectedOrder.model_height_mm,
+          quantity: selectedOrder.quantity || 1,
+          weight_g: selectedOrder.total_weight ? Number(selectedOrder.total_weight) : 0,
+          shipping_method: selectedOrder.shipping_service || 'UPS Ground'
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Failed to get packing recommendation: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setPackingRecommendation(data);
+    } catch (err) {
+      setPackingError(err.message);
+      console.error('Packing recommendation error:', err);
+    } finally {
+      setPackingLoading(false);
     }
   };
 
@@ -1003,18 +1058,156 @@ const ShippingDashboard = () => {
                   <div className="field-value">{selectedOrder.shipping_zone || 'N/A'}</div>
                 </div>
               </div>
+            </div>
 
-              {!isLabeled && (
-                <div className="label-action">
-                  <button
-                    onClick={() => createUPSLabel(selectedOrder.id)}
-                    className="mark-labeled-btn"
-                    disabled={actionLoading}
-                  >
-                    {actionLoading ? '⟳ Creating Label...' : '✓ Create Label and Mark as Labeled'}
-                  </button>
+            <div className="section packing-optimization">
+              <h2>5. Packing & Box Optimization</h2>
+              <p className="section-description">Get AI-powered packing recommendations based on model dimensions, quantity, and shipping method to optimize costs and ensure safe delivery.</p>
+              
+              {packingError && (
+                <div className="validation-error-banner">
+                  {packingError}
                 </div>
               )}
+
+              {!packingRecommendation ? (
+                <div className="packing-action">
+                  <button 
+                    onClick={getPackingRecommendation} 
+                    disabled={packingLoading}
+                    className="packing-recommendation-btn"
+                  >
+                    {packingLoading ? '⟳ Calculating...' : '📦 Get Packing Recommendation'}
+                  </button>
+                </div>
+              ) : (
+                <div className="packing-result">
+                  <div className="packing-header">
+                    <h3>📦 {packingRecommendation.strategy}</h3>
+                    <button 
+                      onClick={() => setPackingRecommendation(null)}
+                      className="close-packing-btn"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <div className="packing-recommendation-text">
+                    <p>{packingRecommendation.recommendation}</p>
+                  </div>
+
+                  <div className="packing-details">
+                    <div className="packing-detail-item">
+                      <label>Estimated Package Dimensions</label>
+                      <div className="detail-value">
+                        {packingRecommendation.estimated_package_dimensions.length_inches > 0
+                          ? `${packingRecommendation.estimated_package_dimensions.length_inches.toFixed(1)}" × ${packingRecommendation.estimated_package_dimensions.width_inches.toFixed(1)}" × ${packingRecommendation.estimated_package_dimensions.height_inches.toFixed(1)}"`
+                          : 'Dimensions not available'}
+                      </div>
+                    </div>
+
+                    <div className="packing-detail-item">
+                      <label>Number of Packages</label>
+                      <div className="detail-value">{packingRecommendation.number_of_packages}</div>
+                    </div>
+
+                    <div className="packing-detail-item">
+                      <label>Estimated Total Weight</label>
+                      <div className="detail-value">{packingRecommendation.estimated_total_weight_lbs.toFixed(2)} lbs</div>
+                    </div>
+                  </div>
+
+                  {packingRecommendation.notes && packingRecommendation.notes.length > 0 && (
+                    <div className="packing-notes">
+                      <h4>📌 Important Notes:</h4>
+                      <ul>
+                        {packingRecommendation.notes.map((note, idx) => (
+                          <li key={idx}>{note}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <div className="packing-action">
+                    <button 
+                      onClick={getPackingRecommendation} 
+                      disabled={packingLoading}
+                      className="packing-recommendation-btn secondary"
+                    >
+                      {packingLoading ? '⟳ Recalculating...' : '🔄 Recalculate'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            {/* Label Action Buttons - Safety Aware */}
+            {!isLabeled && (
+              <div className="label-action">
+                <button
+                  onClick={() => createUPSLabel(selectedOrder.id)}
+                  className="mark-labeled-btn"
+                  disabled={actionLoading}
+                >
+                  {actionLoading ? '⟳ Creating Label...' : '✅ Create Label'}
+                </button>
+              </div>
+            )}
+
+            {/* Once labeled: show re-download button */}
+            {isLabeled && !selectedOrder?.first_carrier_scan_at && (
+              <div className="label-action label-controls">
+                <button
+                  onClick={() => {
+                    // Re-download (show existing label)
+                    if (selectedOrder?.ups_label_image) {
+                      const labelDataUrl = `data:image/${selectedOrder.ups_label_image_format?.toLowerCase() === 'gif' ? 'gif' : 'png'};base64,${selectedOrder.ups_label_image}`;
+                      const link = document.createElement('a');
+                      link.href = labelDataUrl;
+                      link.download = `label-${selectedOrder.ups_tracking_number}.${selectedOrder.ups_label_image_format?.toLowerCase() === 'gif' ? 'gif' : 'png'}`;
+                      link.click();
+                    }
+                  }}
+                  className="re-download-btn secondary"
+                >
+                  📥 Re-download Label
+                </button>
+                <button
+                  onClick={() => createUPSLabel(selectedOrder.id)}
+                  className="void-regenerate-btn warning"
+                  disabled={actionLoading}
+                  title="Invalidate the previous label and create a new tracking number"
+                >
+                  {actionLoading ? '⟳ Regenerating...' : '⚠️ Void & Regenerate'}
+                </button>
+              </div>
+            )}
+
+            {/* After carrier scan: locked state */}
+            {isLabeled && selectedOrder?.first_carrier_scan_at && (
+              <div className="label-action">
+                <div className="locked-shipment-notice">
+                  <strong>🔒 Shipment Locked</strong>
+                  <p>UPS has already scanned this package. Label regeneration is no longer allowed.</p>
+                  <p className="scan-timestamp">Scanned: {new Date(selectedOrder.first_carrier_scan_at).toLocaleString()}</p>
+                  <button
+                    onClick={() => {
+                      // Re-download only
+                      if (selectedOrder?.ups_label_image) {
+                        const labelDataUrl = `data:image/${selectedOrder.ups_label_image_format?.toLowerCase() === 'gif' ? 'gif' : 'png'};base64,${selectedOrder.ups_label_image}`;
+                        const link = document.createElement('a');
+                        link.href = labelDataUrl;
+                        link.download = `label-${selectedOrder.ups_tracking_number}.${selectedOrder.ups_label_image_format?.toLowerCase() === 'gif' ? 'gif' : 'png'}`;
+                        link.click();
+                      }
+                    }}
+                    className="re-download-btn secondary"
+                  >
+                    📥 Re-download Label
+                  </button>
+                </div>
+              </div>
+            )}
 
               {/* Legacy USPS label marking (for backwards compatibility) */}
               {/* <div className="label-action">
@@ -1033,8 +1226,8 @@ const ShippingDashboard = () => {
                 >
                   ✓ Mark as Labeled (USPS)
                 </button>
-              </div> */}
-            </div>
+              </div>
+            </div> */}
 
             {isLabeled && (
               <div className="section shipment-details">

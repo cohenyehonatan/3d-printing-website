@@ -179,7 +179,8 @@ const QuoteForm = ({ /* pass your existing props */ }) => {
           weight: weightInLbs,
           length: 5,
           width: 5,
-          height: 5
+          height: 5,
+          rush_order: selections.rush_order
         })
       });
 
@@ -684,16 +685,20 @@ const QuoteForm = ({ /* pass your existing props */ }) => {
                           type="radio"
                           name="shippingService"
                           checked={selectedShippingService?.serviceCode === rate.serviceCode}
-                          onChange={() => setSelectedShippingService(rate)}
+                          onChange={() => {
+                            setSelectedShippingService(rate);
+                          }}
                           className="mr-3 w-4 h-4 text-indigo-600"
                         />
                         <div className="flex-1">
-                          <div className="font-medium text-gray-700">{rate.serviceName}</div>
+                          <div className="font-medium text-gray-700">
+                            {rate.serviceName || `Service ${idx + 1}`}
+                          </div>
                           <div className="text-xs text-gray-500">
-                            {rate.estimatedDays && `Estimated delivery: ${rate.estimatedDays} business day${rate.estimatedDays > 1 ? 's' : ''}`}
+                            {rate.estimatedDays ? `Estimated delivery: ${rate.estimatedDays} business day${rate.estimatedDays > 1 ? 's' : ''}` : 'Delivery time TBA'}
                           </div>
                         </div>
-                        <div className="text-lg font-semibold text-indigo-600">{rate.displayCost}</div>
+                        <div className="text-lg font-semibold text-indigo-600">{rate.displayCost || `$${rate.cost?.toFixed(2)}`}</div>
                       </label>
                     ))}
                   </div>
@@ -715,8 +720,8 @@ const QuoteForm = ({ /* pass your existing props */ }) => {
                     <span>{quote.material_cost}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Shipping Cost:</span>
-                    <span>{quote.shipping_cost}</span>
+                    <span className="text-gray-600">Shipping ({selectedShippingService?.serviceName || 'Standard'}):</span>
+                    <span>${selectedShippingService?.cost?.toFixed(2) || parseFloat(quote.shipping_cost.replace('$', '')).toFixed(2)}</span>
                   </div>
                   {selections.rush_order && (
                     <div className="flex justify-between">
@@ -726,7 +731,18 @@ const QuoteForm = ({ /* pass your existing props */ }) => {
                   )}
                   <div className="flex justify-between">
                     <span className="text-gray-600">Sales Tax:</span>
-                    <span>{quote.sales_tax}</span>
+                    <span>
+                      {(() => {
+                        const baseAmount = parseFloat(quote.base_cost.replace('$', ''));
+                        const materialAmount = parseFloat(quote.material_cost.replace('$', ''));
+                        const shippingAmount = selectedShippingService?.cost || parseFloat(quote.shipping_cost.replace('$', ''));
+                        const rushAmount = selections.rush_order ? parseFloat(quote.rush_order_surcharge.replace('$', '')) : 0;
+                        const subtotal = baseAmount + materialAmount + shippingAmount + rushAmount;
+                        const taxRate = 0.07; // Default 7% if not found
+                        const tax = subtotal * taxRate;
+                        return `$${tax.toFixed(2)}`;
+                      })()}
+                    </span>
                   </div>
                 </div>
 
@@ -735,12 +751,24 @@ const QuoteForm = ({ /* pass your existing props */ }) => {
                     <DollarSign className="w-8 h-8 text-green-600 mr-2" />
                     <div>
                       <div className="text-sm text-gray-600">Total Price</div>
-                      <div className="text-3xl font-bold text-gray-900">{quote.total_cost_with_tax}</div>
+                      <div className="text-3xl font-bold text-gray-900">
+                        {(() => {
+                          const baseAmount = parseFloat(quote.base_cost.replace('$', ''));
+                          const materialAmount = parseFloat(quote.material_cost.replace('$', ''));
+                          const shippingAmount = selectedShippingService?.cost || parseFloat(quote.shipping_cost.replace('$', ''));
+                          const rushAmount = selections.rush_order ? parseFloat(quote.rush_order_surcharge.replace('$', '')) : 0;
+                          const subtotal = baseAmount + materialAmount + shippingAmount + rushAmount;
+                          const taxRate = 0.07; // Default 7% if not found
+                          const tax = subtotal * taxRate;
+                          const total = subtotal + tax;
+                          return `$${total.toFixed(2)}`;
+                        })()}
+                      </div>
                     </div>
                   </div>
                   <div className="text-right">
                     <div className="text-sm text-gray-600">Estimated Delivery</div>
-                    <div className="text-lg font-semibold">3-5 business days</div>
+                    <div className="text-lg font-semibold">{selectedShippingService?.estimatedDays ? `${selectedShippingService.estimatedDays} business day${selectedShippingService.estimatedDays > 1 ? 's' : ''}` : '3-5 business days'}</div>
                   </div>
                 </div>
 

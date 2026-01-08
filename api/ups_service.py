@@ -15,6 +15,26 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 # ============================================================================
+# UPS SERVICE CODE MAPPINGS
+# ============================================================================
+# Maps UPS service codes to human-readable names
+# Source: UPS API documentation
+UPS_SERVICE_NAMES = {
+    "01": "UPS Next Day Air",
+    "02": "UPS 2nd Day Air",
+    "03": "UPS Ground",
+    "12": "UPS 3-Day Select",
+    "13": "UPS Next Day Air Saver",
+    "14": "UPS Next Day Air Early A.M.",
+    "59": "UPS 2nd Day Air A.M.",
+    "26": "UPS Next Day Air Saturday",
+    "27": "UPS Domestic Express",
+    "82": "UPS Ground",
+    "83": "UPS Ground Premium",
+    "84": "UPS Standard",
+}
+
+# ============================================================================
 # TOKEN CACHE (In-memory with expiry)
 # ============================================================================
 
@@ -558,7 +578,11 @@ class UPSService:
         weight_lbs: float,
         service_type: str = "03",  # UPS Ground = 03, Next Day = 01, 2nd Day = 02
         billing_option: str = "01",  # 01=BillShipper, 02=BillReceiver, 03=BillThirdParty, 04=ConsigneeBilled
-        return_label: bool = False
+        return_label: bool = False,
+        to_company: Optional[str] = None,
+        reference_number_1: Optional[str] = None,
+        reference_number_2: Optional[str] = None,
+        declared_value: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Create a UPS shipping label.
@@ -649,6 +673,7 @@ class UPSService:
                     },
                     "ShipTo": {
                         "Name": to_name,
+                        "CompanyDisplayableName": to_company,
                         "Address": {
                             "AddressLine": [to_street],  # ✅ array
                             "City": to_city,
@@ -665,6 +690,10 @@ class UPSService:
                             "LabelDeliveryMethod": "03"  # Return label as PNG
                         }
                     },
+                    "ReferenceNumber": [ref for ref in [
+                        {"Value": reference_number_1} if reference_number_1 else None,
+                        {"Value": reference_number_2} if reference_number_2 else None,
+                    ] if ref] if (reference_number_1 or reference_number_2) else None,
                     "Package": [
                         {
                             # UPS Shipping API expects "Packaging" (not "PackagingType").
@@ -685,7 +714,14 @@ class UPSService:
                                 },
                                 "Weight": str(weight_lbs)
                             },
-                            "Description": "3D Printed Item"
+                            "Description": "3D Printed Item",
+                            "PackageServiceOptions": {
+                                "DeclaredValue": {
+                                    "Type": {"Code": "01"},
+                                    "MonetaryValue": f"{declared_value:.2f}",
+                                    "CurrencyCode": "USD"
+                                }
+                            } if declared_value and declared_value > 0 else {}
                         }
                     ],
                     "Service": {
@@ -1072,7 +1108,8 @@ class UPSService:
         length_in: float = 5,
         width_in: float = 5,
         height_in: float = 5,
-        get_all_services: bool = True
+        get_all_services: bool = True,
+        rush_order: bool = False
     ) -> Dict[str, Any]:
         """
         Get UPS shipping rates for a shipment using the Rating API.
@@ -1089,6 +1126,7 @@ class UPSService:
             width_in: Package width in inches
             height_in: Package height in inches
             get_all_services: If True, use Shop mode to get all services; if False, get Ground only
+            rush_order: If True, prioritize expedited shipping services (Next Day, 2nd Day)
         
         Returns:
             Dict with available UPS services and rates, or error info
@@ -1121,8 +1159,8 @@ class UPSService:
         }
         
         # Build Rating API request
-        # Use 'Shop' to get all services, or 'Rate' for specific service
-        request_option = "Shop" if get_all_services else "Rate"
+        # Use 'ShopTimeInTransit' to get all services WITH transit times
+        request_option = "ShopTimeInTransit" if get_all_services else "RateTimeInTransit"
         
         payload = {
             "RateRequest": {
@@ -1174,6 +1212,13 @@ class UPSService:
                                 }
                             }
                         ]
+                    },
+                    "DeliveryTimeInformation": {
+                        "PackageBillType": "03",  # Non-Document (required for ShopTimeInTransit)
+                        "Pickup": {
+                            "Date": datetime.now().strftime("%Y%m%d"),
+                            "Time": "1200"  # Noon pickup
+                        }
                     },
                     "Package": [
                         {
@@ -1262,20 +1307,52 @@ class UPSService:
                 for shipment in rated_shipments:
                     service = shipment.get("Service", {})
                     service_code = service.get("Code", "")
-                    service_desc = service.get("Description", "Unknown Service")
+                    service_desc = service.get("Description", "")
+                    
+                    # If Description is empty, use our service code mapping
+                    if not service_desc or service_desc.strip() == "":
+                        service_desc = UPS_SERVICE_NAMES.get(service_code, f"UPS Service {service_code}")
+                    
+                    # Filter services based on rush_order flag
+                    # For rush orders, prioritize expedited services (codes 01, 02, 12, 13, 14, 59, 26)
+                    # For standard orders, show all services but prioritize Ground (code 03)
+                    expedited_codes = {"01", "02", "12", "13", "14", "59", "26"}  # Next Day, 2nd Day, 3-Day, etc.
+                    
+                    if rush_order:
+                        # For rush orders, only show expedited services
+                        if service_code not in expedited_codes:
+                            continue
                     
                     # Get transportation charges
                     transport_charges = shipment.get("TransportationCharges", {})
                     cost = transport_charges.get("MonetaryValue", "0.00")
                     currency = transport_charges.get("CurrencyCode", "USD")
                     
-                    # Get transit time if available
-                    time_in_transit = shipment.get("TimeInTransit", {})
+                    # Get transit time from GuaranteedDelivery or TimeInTransit
                     transit_days = None
-                    if time_in_transit:
-                        # Try to extract business days
-                        transit_info = time_in_transit.get("ServiceSummary", {})
-                        transit_days = transit_info.get("EstimatedArrival", {}).get("BusinessDaysInTransit")
+                    
+                    # First try GuaranteedDelivery (primary source for expedited services)
+                    guaranteed_delivery = shipment.get("GuaranteedDelivery", {})
+                    if guaranteed_delivery:
+                        transit_days = guaranteed_delivery.get("BusinessDaysInTransit")
+                        if transit_days:
+                            transit_days = int(transit_days) if isinstance(transit_days, str) else transit_days
+                    
+                    # Fallback to TimeInTransit if GuaranteedDelivery not available
+                    # This is needed for Ground and other services
+                    if not transit_days:
+                        time_in_transit = shipment.get("TimeInTransit", {})
+                        if time_in_transit:
+                            service_summary = time_in_transit.get("ServiceSummary", {})
+                            estimated_arrival = service_summary.get("EstimatedArrival", {})
+                            transit_days = estimated_arrival.get("BusinessDaysInTransit")
+                            if transit_days:
+                                transit_days = int(transit_days) if isinstance(transit_days, str) else transit_days
+                    
+                    # For Ground without TimeInTransit, use sensible default
+                    if not transit_days and service_code == "03":
+                        logger.info(f"Ground service has no transit time data, using default 5 business days")
+                        transit_days = 5
                     
                     rates.append({
                         "serviceCode": service_code,

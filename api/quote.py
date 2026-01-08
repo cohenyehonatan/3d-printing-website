@@ -679,6 +679,7 @@ class ShippingRatesRequest(BaseModel):
     length: float = 5  # in inches
     width: float = 5
     height: float = 5
+    rush_order: bool = False  # If True, prioritize expedited services
 
 
 class ShippingRateOption(BaseModel):
@@ -1197,6 +1198,11 @@ async def get_shipping_labels():
                     "shipping_cost_cents": order.shipping_cost_cents,
                     "shipping_zone": order.shipping_zone,
                 },
+                "model_dimensions": {
+                    "length_mm": order.model_length_mm,
+                    "width_mm": order.model_width_mm,
+                    "height_mm": order.model_height_mm,
+                },
                 "packaging": {
                     "type": order.packaging_type,
                     "contains_hazmat": order.contains_hazmat,
@@ -1297,6 +1303,10 @@ async def create_label_ups(order_id: int, label_request: Optional[dict] = None):
     Create a UPS shipping label and mark the order as labeled.
     
     The UPS Shipping API will generate a tracking number and label.
+    
+    Safety checks:
+    - Blocks label regeneration if UPS has already scanned the package
+    - Prevents multiple valid shipments from being charged
     """
     from .models import PrintOrder
     from .database import SessionLocal
@@ -1308,6 +1318,16 @@ async def create_label_ups(order_id: int, label_request: Optional[dict] = None):
         
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
+        
+        # ========================================================================
+        # CRITICAL SAFETY CHECK: Prevent regeneration if UPS has scanned package
+        # ========================================================================
+        if getattr(order, 'ups_tracking_number', None) and getattr(order, 'first_carrier_scan_at', None):
+            raise HTTPException(
+                status_code=409,
+                detail="Shipment already scanned by UPS. Label cannot be regenerated. "
+                       "Contact support if you need to void this shipment."
+            )
         
         # Get delivery and shipping info (prefer normalized fields; delivery_address is legacy freeform text)
         delivery = {
@@ -1329,16 +1349,12 @@ async def create_label_ups(order_id: int, label_request: Optional[dict] = None):
         shipper_street = os.getenv("SHIPPER_STREET", "123 Main St")
         
         # Convert weight from grams to pounds
-        weight_grams = order.shipping_weight_g or order.weight_g or 0
-
-        # If weight_grams might be a SQLAlchemy Column, extract its value
+        # Extract values from database columns first
+        weight_grams = getattr(order, 'shipping_weight_g', None) or getattr(order, 'weight_g', None) or 0
+        
         try:
-            # Handle SQLAlchemy Column objects by checking for the value attribute
-            if hasattr(weight_grams, 'value'):
-                weight_grams = float(getattr(weight_grams, 'value')) if getattr(weight_grams, 'value') else 0.0
-            else:
-                weight_grams = float(getattr(order, "weight_grams", 0)) if getattr(order, "weight_grams", 0) else 0.0
-        except (TypeError, ValueError, AttributeError):
+            weight_grams = float(weight_grams) if weight_grams else 0.0
+        except (TypeError, ValueError):
             weight_grams = 0.0
 
         weight_lbs = round(weight_grams / GRAMS_PER_LB, 2)
@@ -1365,7 +1381,11 @@ async def create_label_ups(order_id: int, label_request: Optional[dict] = None):
             to_zip=getattr(delivery, 'zip', ''),
             weight_lbs=weight_lbs,
             service_type=service_type,
-            billing_option=getattr(order, "billing_option", "01")
+            billing_option=getattr(order, "billing_option", "01"),
+            to_company=getattr(order, "delivery_company", None),
+            reference_number_1=getattr(order, "reference_number_1", None),
+            reference_number_2=getattr(order, "reference_number_2", None),
+            declared_value=float(getattr(order, "package_value", 0)) if getattr(order, "package_value", None) else None
         )
         
         # Handle label creation errors
@@ -1729,6 +1749,7 @@ async def get_shipping_rates(request_data: ShippingRatesRequest):
     Get available UPS shipping rates for a package.
     
     Returns list of available services with costs and estimated delivery times.
+    If rush_order is True, prioritizes expedited shipping services.
     """
     try:
         zip_code = request_data.zip_code
@@ -1737,6 +1758,7 @@ async def get_shipping_rates(request_data: ShippingRatesRequest):
         length = request_data.length
         width = request_data.width
         height = request_data.height
+        rush_order = request_data.rush_order
         
         # Validate inputs
         if not zip_code or not _zip_cache.get(zip_code):
@@ -1782,7 +1804,8 @@ async def get_shipping_rates(request_data: ShippingRatesRequest):
             length_in=length,
             width_in=width,
             height_in=height,
-            get_all_services=True
+            get_all_services=True,
+            rush_order=rush_order
         )
         
         if rates_response.get("error"):
@@ -1828,9 +1851,13 @@ async def track_shipment(tracking_number: str):
     
     Returns tracking information including current status, location, and activity history.
     Note: UPS retains tracking data for 120 days after shipment pickup.
+    
+    CRITICAL: Detects and persists first carrier scan to prevent label regeneration.
     """
     try:
         from . import ups_service as ups_module
+        from .models import PrintOrder
+        from .database import SessionLocal
         
         # Use the UPS service to get tracking information
         result = await ups_module.ups_service.track_shipment(tracking_number)
@@ -1838,8 +1865,116 @@ async def track_shipment(tracking_number: str):
         if result.get('error'):
             raise HTTPException(status_code=400, detail=result.get('message', 'Failed to track shipment'))
         
+        # ========================================================================
+        # CRITICAL: Detect first carrier scan and persist it
+        # ========================================================================
+        db = SessionLocal()
+        try:
+            order = db.query(PrintOrder).filter(
+                PrintOrder.ups_tracking_number == tracking_number
+            ).first()
+            
+            if order and order.first_carrier_scan_at is None:
+                # Check if any carrier activity (beyond just label creation) exists
+                activities = result.get('activities', [])
+                has_carrier_scanned = False
+                
+                # Look for scan events that indicate UPS has physical possession
+                SCAN_INDICATORS = {
+                    'Pickup Scan', 'Origin Scan', 'Package Received', 
+                    'Arrived at Facility', 'In Transit', 'Out for Delivery',
+                    'Delivered', 'Delivery Confirmed', 'Package Delivered'
+                }
+                
+                for activity in activities:
+                    status = activity.get('status', '').strip()
+                    # Check if status contains any scan indicator (case-insensitive)
+                    if any(indicator.lower() in status.lower() for indicator in SCAN_INDICATORS):
+                        has_carrier_scanned = True
+                        break
+                
+                if has_carrier_scanned:
+                    # Persist the scan timestamp and lock the shipment
+                    setattr(order, 'first_carrier_scan_at', datetime.utcnow())
+                    setattr(order, 'label_status', 'shipped')
+                    db.commit()
+                    logging.info(
+                        f"Carrier scan detected and persisted for order {order.id} "
+                        f"(tracking {tracking_number}). Label regeneration now blocked."
+                    )
+        except Exception as e:
+            logging.error(f"Error persisting carrier scan for {tracking_number}: {e}")
+        finally:
+            db.close()
+        
         return result
     
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"Error tracking shipment {tracking_number}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to track shipment: {str(e)}")
+
+
+class PackingRequest(BaseModel):
+    """Request for packing recommendations"""
+    model_length_mm: Optional[float] = None
+    model_width_mm: Optional[float] = None
+    model_height_mm: Optional[float] = None
+    quantity: int = 1
+    weight_g: float
+    shipping_method: str
+
+
+class PackingRecommendation(BaseModel):
+    """Packing recommendation response"""
+    strategy: str
+    recommendation: str
+    estimated_package_dimensions: dict
+    estimated_total_weight_lbs: float
+    number_of_packages: int
+    notes: List[str]
+
+
+@app.post('/api/packing-recommendation')
+async def get_packing_recommendation(request: PackingRequest) -> PackingRecommendation:
+    """
+    Calculate optimal packing strategy for an order.
+    
+    Takes model dimensions, quantity, weight, and shipping method to recommend
+    the most efficient packing approach with cost optimization.
+    
+    Parameters:
+    - model_length_mm: Model length in millimeters
+    - model_width_mm: Model width in millimeters
+    - model_height_mm: Model height in millimeters
+    - quantity: Number of items to pack
+    - weight_g: Weight per single item in grams
+    - shipping_method: Selected shipping method (e.g., "UPS Ground", "USPS Priority Mail")
+    
+    Returns: Packing recommendation with strategy and notes
+    """
+    try:
+        from .packing_optimizer import calculate_packing
+        
+        result = calculate_packing(
+            model_length_mm=request.model_length_mm,
+            model_width_mm=request.model_width_mm,
+            model_height_mm=request.model_height_mm,
+            quantity=request.quantity,
+            weight_per_unit_g=request.weight_g,
+            shipping_method=request.shipping_method,
+        )
+        
+        return PackingRecommendation(
+            strategy=result.strategy,
+            recommendation=result.recommendation,
+            estimated_package_dimensions=result.estimated_package_dimensions,
+            estimated_total_weight_lbs=result.estimated_total_weight_lbs,
+            number_of_packages=result.number_of_packages,
+            notes=result.notes,
+        )
+    
+    except Exception as e:
+        logging.error(f"Error calculating packing recommendation: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to calculate packing: {str(e)}")
